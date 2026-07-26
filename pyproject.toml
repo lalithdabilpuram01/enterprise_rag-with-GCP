@@ -1,0 +1,9 @@
+[project]
+name = "enterprise-rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "logfire[system-metrics]>=4.39.0",
+]
