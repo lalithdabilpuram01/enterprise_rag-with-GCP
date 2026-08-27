@@ -28,33 +28,17 @@ vertexai.init(project=settings.PROJECT_ID, location=settings.LOCATION)
 #Initilize GCS Client
 storage_client = storage.Client(project=settings.PROJECT_ID)
 
-
-def require_setting(value: Optional[str], name: str) -> str:
-    """Returns a configured setting or raises a clear startup error."""
-    if not value:
-        raise ValueError(f"{name} is not set")
-
-    return value
-
-
 # Initialize Qdrant Client
 
-# Without an explicit timeout the REST transport falls back to httpx's 5s default,
-# which a bulk upsert of a long document will always blow through.
 qdrant_client = QdrantClient(
-    url= require_setting(settings.QDRANT_URL, "QDRANT_CLUSTER_ENDPOINT"),
-    api_key= settings.QDRANT_API_KEY,
-    timeout=120
+    url= settings.QDRANT_URL,
+    api_key= settings.QDRANT_API_KEY
 )
 
 # text-embedding-004 returns 768-dimensional vectors
 EMBEDDING_DIM = 768
 
 SUPPORTED_EXTENSIONS = {"pdf", "html", "htm", "txt", "docx", "pptx"}
-
-# A long PDF yields thousands of chunks; sending them in one request risks
-# request-size limits and timeouts, so upserts go up in fixed-size batches.
-UPSERT_BATCH_SIZE = 128
 
 # Stable namespace so re-ingesting a file overwrites its points instead of duplicating them
 POINT_NAMESPACE = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
@@ -137,14 +121,6 @@ def process_file(file_path: str, filename: str, source_type: str ):
             # 6. Embed and Index in Qdrant
             with logfire.span("Vectorizing & Indexing"):
                 embeddings = embed_texts(chunks)
-
-                # zip() would silently drop chunks if the embedder returned a short list
-                if len(embeddings) != len(chunks):
-                    raise ValueError(
-                        f"Embedding count mismatch for {filename}: "
-                        f"{len(embeddings)} embeddings for {len(chunks)} chunks"
-                    )
-
                 points = []
                 for i , (chunk, vector) in enumerate(zip(chunks,embeddings)):
                     points.append(models.PointStruct(
@@ -159,12 +135,10 @@ def process_file(file_path: str, filename: str, source_type: str ):
                         }
                     ))
 
-                for start in range(0, len(points), UPSERT_BATCH_SIZE):
-                    qdrant_client.upsert(
-                        collection_name=settings.QDRANT_COLLECTION,
-                        points=points[start : start + UPSERT_BATCH_SIZE]
-                    )
-
+                qdrant_client.upsert(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    points=points
+                )
                 logfire.info(f"Indexed {len(points)} points to Qdrant")
 
         except Exception as e :
@@ -194,8 +168,8 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: Optional[str] =
                 )
 
         # Scan for subfolders (ignore hidden ones)
-        subdirs = [
-            d for d in sorted(os.listdir(base_dir))
+        #subdirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+        subdirs = [ d for d in sorted(os.listdir(base_dir))
             if not d.startswith('.') and os.path.isdir(os.path.join(base_dir, d))
         ]
 
