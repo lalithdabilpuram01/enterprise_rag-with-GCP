@@ -28,11 +28,18 @@ class Settings:
     LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "enterprise-rag-1")
     LANGSMITH_ENDPOINT = os.getenv("LANGSMITH_ENDPOINT")
 
-# Apply Langchain environment variables for automatic tracing
-os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGSMITH_TRACING", "true")
-os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
-os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "enterprise-rag-1")
-os.environ["LANGCHAIN_ENDPOINT"] = os.getenv("LANGSMITH_ENDPOINT")
+# Apply Langchain environment variables for automatic tracing.
+# os.environ rejects None, so unset optional vars are skipped rather than crashing on import.
+_LANGCHAIN_ENV = {
+    "LANGCHAIN_TRACING_V2": Settings.LANGSMITH_TRACING,
+    "LANGCHAIN_API_KEY": Settings.LANGSMITH_API_KEY,
+    "LANGCHAIN_PROJECT": Settings.LANGSMITH_PROJECT,
+    "LANGCHAIN_ENDPOINT": Settings.LANGSMITH_ENDPOINT,
+}
+
+for _key, _value in _LANGCHAIN_ENV.items():
+    if _value is not None:
+        os.environ[_key] = _value
 
 
 

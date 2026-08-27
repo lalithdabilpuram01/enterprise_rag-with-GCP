@@ -1,101 +1,135 @@
 import io
+from typing import Optional
+
 import logfire
 from pypdf import PdfReader, PdfWriter
+from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
 from app.config import settings
 
 
-client = documentai.DocumentProcessorServiceClient()
-MAAX_PAGES_PER_REQUEST = 15
+MAX_PAGES_PER_REQUEST = 15
 
-def parse_pdf(file_path: str):
+_client: Optional[documentai.DocumentProcessorServiceClient] = None
+
+
+def get_client() -> documentai.DocumentProcessorServiceClient:
+    """
+    Builds the Document AI client lazily, pinned to the processor's region.
+
+    The default endpoint only resolves processors in "us"; any other location
+    (eu, asia, ...) needs a regional api_endpoint or every call 404s.
+    """
+    global _client
+    if _client is None:
+        _client = documentai.DocumentProcessorServiceClient(
+            client_options=ClientOptions(
+                api_endpoint=f"{settings.GCP_DOC_AI_LOCATION}-documentai.googleapis.com"
+            )
+        )
+    return _client
+
+
+def get_processor_name(client: documentai.DocumentProcessorServiceClient) -> str:
+    """Builds the fully-qualified Document AI processor name."""
+    if not settings.GCP_DOC_AI_PROCESSOR_ID:
+        raise ValueError("GCP_DOC_AI_PROCESSOR_ID is not set")
+
+    return client.processor_path(
+        settings.PROJECT_ID,
+        settings.GCP_DOC_AI_LOCATION,
+        settings.GCP_DOC_AI_PROCESSOR_ID
+    )
+
+
+def parse_pdf(file_path: str) -> str:
     """
     Parse PDF using Google Cloud Document AI.
-    Automatically spilts large PDFs into 15-page chunks to bypass synchronous API limits.
+    Automatically splits large PDFs into 15-page chunks to bypass synchronous API limits.
     """
 
-    with logfire.span(" Document AI Parsing", filename= file_path):
+    with logfire.span("Document AI Parsing", filename=file_path):
         try:
+            client = get_client()
             reader = PdfReader(file_path)
+
+            # Many PDFs carry only an owner password and open with an empty one.
+            if reader.is_encrypted:
+                decrypt_result = reader.decrypt("")
+                if decrypt_result == 0:
+                    raise ValueError(f"Could not decrypt encrypted PDF: {file_path}")
+
             total_pages = len(reader.pages)
             logfire.info(f"Total pages: {total_pages}")
 
-            name = client.processor_path(
-                settings.PROJECT_ID,
-                settings.GCP_DOC_AI_LOCATION,
-                settings.GCP_DOC_AI_PROCESSOR_ID,
-            )
+            if total_pages == 0:
+                logfire.warning(f"No pages found in {file_path}")
+                return ""
 
-            full_text = ""
+            name = get_processor_name(client)
 
-            # if small enoughn process entirely
+            parts = []
 
-            if total_pages <= MAAX_PAGES_PER_REQUEST:
+            # if small enough, process entirely
+            if total_pages <= MAX_PAGES_PER_REQUEST:
                 with open(file_path, "rb") as f:
                     image_content = f.read()
-                full_text = process_document_chunk(image_content,name )
+                parts.append(process_document_chunk(image_content, name, client))
 
             else:
                 # Split into chunks of MAX_PAGES_PER_REQUEST
-                logfire.info(f"PDF exceeds {MAAX_PAGES_PER_REQUEST} pages. Splitting into chunks...")
+                logfire.info(f"PDF exceeds {MAX_PAGES_PER_REQUEST} pages. Splitting into chunks...")
 
-                for i in range(0, total_pages, MAAX_PAGES_PER_REQUEST ):
+                for i in range(0, total_pages, MAX_PAGES_PER_REQUEST):
                     writer = PdfWriter()
-                    chunk_end = min(i+ MAAX_PAGES_PER_REQUEST, total_pages)
+                    chunk_end = min(i + MAX_PAGES_PER_REQUEST, total_pages)
 
-                    for page_num in range(i,chunk_end):
+                    for page_num in range(i, chunk_end):
                         writer.add_page(reader.pages[page_num])
 
                     # Write chunk to bytes
+                    bytes_stream = io.BytesIO()
+                    writer.write(bytes_stream)
+                    chunk_bytes = bytes_stream.getvalue()
 
-                    with io.BytesIO() as bytes_stream:
-                        writer.write(bytes_stream)
-                        chunk_bytes = bytes_stream.getvalue()
+                    with logfire.span("Processing pages", start=i + 1, end=chunk_end):
+                        parts.append(process_document_chunk(chunk_bytes, name, client))
 
-                    with logfire.span(f"Processing page {i+1} to {chunk_end}"):
-                        chunk_text = process_document_chunk(chunk_bytes, name)
-                        full_text += chunk_text + "\n"
+            full_text = "\n".join(part for part in parts if part)
 
             if not full_text.strip():
-                logfire.warning(f" Document AI returned empty text for {file_path}")
+                logfire.warning(f"Document AI returned empty text for {file_path}")
 
-            else : 
-                logfire.info(f" Document AI Successfully parsed {len(full_text)} characters")
+            else:
+                logfire.info(f"Document AI successfully parsed {len(full_text)} characters")
 
-            return full_text  
+            return full_text
 
         except Exception as e:
-            logfire.error(f"PDF parser Failed {e}")
+            logfire.error(f"PDF parser failed for {file_path}: {e}")
             raise e
-        
 
 
+def process_document_chunk(
+    image_content: bytes,
+    name: str,
+    client: Optional[documentai.DocumentProcessorServiceClient] = None,
+) -> str:
+    """Helper function to send a specific byte chunk to Document AI."""
+    client = client or get_client()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def process_document_chunk(image_content: bytes, name:str) -> str:
-    """Helper function to send a specific byte chunk to Document AI. """
     raw_document = documentai.RawDocument(
-        content = image_content,
-        mime_type = "application/pdf"
+        content=image_content,
+        mime_type="application/pdf",
     )
 
     request = documentai.ProcessRequest(
-        name = name,
-        raw_document = raw_document
+        name=name,
+        raw_document=raw_document,
     )
 
     result = client.process_document(request=request)
+    if result.document is None:
+        return ""
+
     return result.document.text

@@ -9,7 +9,7 @@ def get_embedding_model():
         # Reverting to TextEmbeddingModel for stability
         model = TextEmbeddingModel.from_pretrained("text-embedding-004")
 
-        return model
+    return model
 
 
 def embed_query(query: str):
@@ -33,6 +33,5 @@ def embed_texts(texts : list[str]):
         embeddings = model.get_embeddings(batch)
         all_embeddings.extend( [e.values for e in embeddings])
 
-        return all_embeddings
-    
+    return all_embeddings
 

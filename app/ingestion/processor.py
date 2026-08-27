@@ -6,7 +6,7 @@ import logfire
 import vertexai
 
 
-from typing import List
+from typing import Optional
 from google.cloud import storage
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -28,12 +28,37 @@ vertexai.init(project=settings.PROJECT_ID, location=settings.LOCATION)
 #Initilize GCS Client
 storage_client = storage.Client(project=settings.PROJECT_ID)
 
+
+def require_setting(value: Optional[str], name: str) -> str:
+    """Returns a configured setting or raises a clear startup error."""
+    if not value:
+        raise ValueError(f"{name} is not set")
+
+    return value
+
+
 # Initialize Qdrant Client
 
+# Without an explicit timeout the REST transport falls back to httpx's 5s default,
+# which a bulk upsert of a long document will always blow through.
 qdrant_client = QdrantClient(
-    url= settings.QDRANT_URL,
-    api_key= settings.QDRANT_API_KEY
+    url= require_setting(settings.QDRANT_URL, "QDRANT_CLUSTER_ENDPOINT"),
+    api_key= settings.QDRANT_API_KEY,
+    timeout=120
 )
+
+# text-embedding-004 returns 768-dimensional vectors
+EMBEDDING_DIM = 768
+
+SUPPORTED_EXTENSIONS = {"pdf", "html", "htm", "txt", "docx", "pptx"}
+
+# A long PDF yields thousands of chunks; sending them in one request risks
+# request-size limits and timeouts, so upserts go up in fixed-size batches.
+UPSERT_BATCH_SIZE = 128
+
+# Stable namespace so re-ingesting a file overwrites its points instead of duplicating them
+POINT_NAMESPACE = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+
 
 def upload_to_gcs(data, bucket_name:str , destination_blob_name: str, is_json : bool = False):
     """
@@ -56,63 +81,98 @@ def upload_to_gcs(data, bucket_name:str , destination_blob_name: str, is_json : 
             logfire.error(f"GCS Upload Failed: {e}")
             raise e
 
+def extract_text(file_path: str, ext: str) -> str:
+    """
+    Dispatches to the right loader for the given extension.
+    """
+    if ext == "pdf":
+        return parse_pdf(file_path)
+
+    if ext in ("html", "htm"):
+        return parse_html(file_path)
+
+    if ext == "txt":
+        return parse_text(file_path)
+
+    # Imported lazily: `unstructured` is heavy and only needed for Office files.
+    from app.ingestion.loaders.office import parse_office
+    return parse_office(file_path)
+
 def process_file(file_path: str, filename: str, source_type: str ):
     """
     orchestrates the parsing, chunking, embedding, and indexing of a single file.
     """
     with logfire.span("Processing file", file = filename, source= source_type):
         try:
-            # 1. Upload RAW file to GCS
+            # 1. Reject unsupported types before touching GCS
+            ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ""
+            if ext not in SUPPORTED_EXTENSIONS:
+                logfire.warning(f"Skipping unsupported file type: {filename} ")
+                return
+
+            # 2. Upload RAW file to GCS
             raw_gcs_path = f"{source_type}/{filename}"
             upload_to_gcs(file_path, settings.RAW_BUCKET, raw_gcs_path)
 
-            # 2. Extract Text based on extension
-            ext = filename.lower().split('.')[-1]
-            if ext == "pdf" :
-                full_text = parse_pdf(file_path)
-            elif ext in ["html", "htm"]:
-                full_text = parse_html(file_path)
-
-            elif ext == "txt":
-                full_text = parse_text(file_path)
-            elif ext in ["docx", "pptx"]:
-                from app.ingestion.loaders.office import parse_office
-                full_text = parse_office(file_path)
-
-            else :
-                logfire.warning(f"Skipping unsupported file type: {filename} ")
-
-                return
+            # 3. Extract Text based on extension
+            full_text = extract_text(file_path, ext)
 
             if not full_text or not full_text.strip():
                 logfire.warning(f"No text extracted from {filename} ")
                 return
 
-            # 3. Chunk Text
+            # 4. Chunk Text
 
             chunks = chunk_text(full_text)
 
             if not chunks :
+                logfire.warning(f"No chunks produced for {filename} ")
                 return
 
-            # 4. Upload PROCESSED metadata to GCS
+            # 5. Upload PROCESSED metadata to GCS
             processed_data = {"filename": filename, "chunks": chunks, "source_type": source_type}
             processed_gcs_path = f"{source_type}/{filename}.json"
             upload_to_gcs(processed_data, settings.PROCESSED_BUCKET, processed_gcs_path, is_json=True)
 
-            # Embed and Index in
+            # 6. Embed and Index in Qdrant
+            with logfire.span("Vectorizing & Indexing"):
+                embeddings = embed_texts(chunks)
 
+                # zip() would silently drop chunks if the embedder returned a short list
+                if len(embeddings) != len(chunks):
+                    raise ValueError(
+                        f"Embedding count mismatch for {filename}: "
+                        f"{len(embeddings)} embeddings for {len(chunks)} chunks"
+                    )
 
-            
+                points = []
+                for i , (chunk, vector) in enumerate(zip(chunks,embeddings)):
+                    points.append(models.PointStruct(
+                        id=str(uuid.uuid5(POINT_NAMESPACE, f"{source_type}/{filename}#{i}")),
+                        vector= vector,
+                        payload={
+                            "text": chunk,
+                            "chunk_index": i,
+                            "source": filename,
+                            "source_type": source_type,
+                            "raw_gcs_path" : f"gs://{settings.RAW_BUCKET}/{raw_gcs_path}"
+                        }
+                    ))
 
+                for start in range(0, len(points), UPSERT_BATCH_SIZE):
+                    qdrant_client.upsert(
+                        collection_name=settings.QDRANT_COLLECTION,
+                        points=points[start : start + UPSERT_BATCH_SIZE]
+                    )
 
+                logfire.info(f"Indexed {len(points)} points to Qdrant")
 
         except Exception as e :
-            logfire.error(f" error processing file {filename}")
+            logfire.error(f"Error processing file {filename}: {e}")
             raise e
 
 
-def run_universal_ingestion(base_dir: str, explicit_source_type: str = None , wipe: bool = False):
+def run_universal_ingestion(base_dir: str, explicit_source_type: Optional[str] = None , wipe: bool = False):
     """
     Automatically scans the directory.
     if it has subfolders, maps them to source_types.
@@ -122,7 +182,7 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None , wi
 
         # Handle Collection Wipe
         if wipe :
-            with logfire.span("wiping collection")
+            with logfire.span("wiping collection"):
                 if qdrant_client.collection_exists(settings.QDRANT_COLLECTION):
                     qdrant_client.delete_collection(settings.QDRANT_COLLECTION)
                     logfire.info(f" collection {settings.QDRANT_COLLECTION} deleted")
@@ -130,11 +190,16 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None , wi
         if not qdrant_client.collection_exists(settings.QDRANT_COLLECTION):
             qdrant_client.create_collection(
                 collection_name= settings.QDRANT_COLLECTION,
-                vectors_config= models.VectorParams(size=768, distance=models.Distance.COSINE)
+                vectors_config= models.VectorParams(size=EMBEDDING_DIM, distance=models.Distance.COSINE)
                 )
 
-        # Scan for subfolders
-        subdirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir,d))]
+        # Scan for subfolders (ignore hidden ones)
+        subdirs = [
+            d for d in sorted(os.listdir(base_dir))
+            if not d.startswith('.') and os.path.isdir(os.path.join(base_dir, d))
+        ]
+
+        failures = 0
 
         if not subdirs:
             # If no subdirs, use explict type or infer from the base directory.
@@ -148,17 +213,40 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None , wi
 
             logfire.info(f" No Subdirs found, processing {base_dir} as '{source_type}'")
 
-            process_file(base_dir, source_type)
+            failures += process_directory(base_dir, source_type)
 
-def process_directory(dir_path: str, source_type: str):
+        else :
+            for subdir in subdirs:
+                source_type = "true" if "true" in subdir.lower() else "noisy" if "noisy" in subdir.lower() else subdir
+                failures += process_directory(os.path.join(base_dir, subdir), source_type)
+
+        if failures:
+            logfire.warning(f"Ingestion finished with {failures} failed file(s)")
+
+        return failures
+
+def process_directory(dir_path: str, source_type: str) -> int:
     """
-    Process all files in a specific directory.
+    Process all files in a specific directory. Returns the number of files that failed.
+
+    A single bad file must not abort the whole batch, so failures are logged and counted.
     """
-    with logfire.span(f"Scanning Directory", path=dir_path, source_type= source_type):
-        files = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))]
+    with logfire.span("Scanning Directory", path=dir_path, source_type= source_type):
+        files = [
+            f for f in sorted(os.listdir(dir_path))
+            if not f.startswith('.') and os.path.isfile(os.path.join(dir_path, f))
+        ]
         logfire.info(f"Found {len(files)} files")
+
+        failures = 0
         for filename in files:
-            process_file(os.path.join(dir_path, filename),filename, source_type)
+            try:
+                process_file(os.path.join(dir_path, filename),filename, source_type)
+            except Exception as e:
+                failures += 1
+                logfire.error(f"Skipping {filename} after failure: {e}")
+
+        return failures
 
 
 if __name__ == "__main__":
@@ -172,12 +260,12 @@ if __name__ == "__main__":
     target_dir = clean_args[1] if len(clean_args) >1 else "DATA"
     explict_type = clean_args[2] if len(clean_args) > 2 else None
 
-    if not os.path.exists(target_dir):
-        print(f"Error: Path {target_dir} does not exist.")
+    if not os.path.isdir(target_dir):
+        print(f"Error: Path {target_dir} is not an existing directory.")
         sys.exit(1)
 
-    run_universal_ingestion(target_dir, explicit_source_type=explict_type, wipe=wipe_requested)
+    failed = run_universal_ingestion(target_dir, explicit_source_type=explict_type, wipe=wipe_requested)
     logfire.info("Universal ingestion Job completed.")
 
-
-
+    if failed:
+        sys.exit(1)
