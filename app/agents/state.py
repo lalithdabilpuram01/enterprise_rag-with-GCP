@@ -2,8 +2,8 @@ from typing import TypedDict, List, Annotated
 import operator
 
 class Agenstate(TypedDict):
-    # Using the Annotated with operator.
-    # are appended to the history rather than rep
+    # Using the Annotated with operator.add ensures that messages
+    # are appended to the history rather than replaced
 
     messages : Annotated[List[dict], operator.add]
     current_query : str

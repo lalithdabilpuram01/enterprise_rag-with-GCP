@@ -3,7 +3,6 @@ from app.agents.state import Agenstate
 from app.config import settings
 import logfire
 
-
 # Initialize the groq model
 llm = ChatGroq(
     api_key= settings.GROQ_API_KEY,
