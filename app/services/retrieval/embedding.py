@@ -7,7 +7,8 @@ MAX_TEXT_CHARS = 6_000
 
 def _batched(texts: list[str]):
     """Yields batches bounded by both instance count and total characters."""
-    batch, batch_chars = [], 0
+    batch: list[str] = []
+    batch_chars = 0
 
     for t in texts:
         if batch and (len(batch)> BATCH_SIZE or batch_chars + len(t)> MAX_BATCH_CHARS):
