@@ -10,6 +10,8 @@ def retrieve_node(state: Agenstate):
 
     query = state['current_query']
 
+    """
+
     if query == "CONVERSATIONAL":
 
         logfire.info("Skipping retrieval - query is COVERSATIONAL")
@@ -21,6 +23,7 @@ def retrieve_node(state: Agenstate):
 
 
         }
+        """
     # Standard Retrieval Logic
     with logfire.span("Knowledge Retrieval"):
         logfire.info(f"Searching Qdrant for: {query}")
