@@ -52,7 +52,7 @@ def planner_node( state: Agenstate):
         }
 
     return {
-        "curren_query": decision,
+        "current_query": decision,
         "status": f"Technical research needed. Searching for : {decision}",
         "plan": ["Intent: Technical", f"Search Term: {decision}"]
     }
