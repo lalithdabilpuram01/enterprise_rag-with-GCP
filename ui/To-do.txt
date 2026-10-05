@@ -1,0 +1,6 @@
+Solve below problemss:
+
+1. LLM provider unavailable Problem (API Gateway & Graceful Degradation.)
+2. Semantic Caching
+3. Auditing api usage or rate limiting
+4. Analytic
