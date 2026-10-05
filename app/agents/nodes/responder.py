@@ -1,16 +1,17 @@
 import logfire
 from langchain_groq import ChatGroq
-from app.agents.state import Agenstate
+from app.agents.state import Agentstate
 from app.config import settings
 
 
 llm = ChatGroq(
     api_key=settings.GROQ_API_KEY,
     model = settings.GROQ_MODEL,
-    temperature=0.1
+    temperature=0.1,
+    max_tokens=settings.GROQ_MAX_TOKENS,
 )
 
-def generate_node(state: Agenstate):
+def generate_node(state: Agentstate):
     """
     Synthesizes a response using both Documentation Context AND Conversation History.
     Uses the native Portkey client (not LangChain) so we can read the
@@ -42,7 +43,7 @@ def generate_node(state: Agenstate):
 
     else :
         logfire.info("Generating technical RAG Response.")
-        max_context_chars = 25000
+        max_context_chars = settings.MAX_CONTEXT_CHARS
         full_context = ""
         for doc in state["documents"]:
             if len(full_context)+len(doc) < max_context_chars:
@@ -74,7 +75,6 @@ def generate_node(state: Agenstate):
             return {
                 "final_answer": response.content,
                 "status": "Response generated.",
-                "messages": [{"role": "assistant", "content": response.content}]
             }
         except Exception as e:
             logfire.error(f"LLM Generation failed: {e}")
