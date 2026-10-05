@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+
+#os
+
+#logfire
+.logfire
+
+# Type checker / test caches
+.mypy_cache/
+.pytest_cache/
+
+# Source corpus - ingested separately, must not be baked into the image
+DATA/
+
+# VCS and editor
+.git
+.gitignore
+.vscode/

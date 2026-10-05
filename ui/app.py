@@ -86,10 +86,11 @@ if prompt := st.chat_input("Ask about your documentation..."):
                     # DISTRIBUTED TRACE: Calling Backend
                     with logfire.span("📡 Calling RAG Backend"):
                         # Get backend URL from env, or default to local if not set
-                        base_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+                        base_url = os.getenv("BACKEND_URL","http://localhost:8000") # "http://localhost:8000", "https://rag-api-851836889082.us-central1.run.app"
                         url = f"{base_url}/query"
                         payload = {"q": prompt, "thread_id": st.session_state.session_id}
-                        response = requests.post(url, json=payload, timeout=60)
+                        response = requests.post(url, json=payload, timeout=120)
+                        response.raise_for_status()
                         data = response.json()
                     
                     # Show Reasoning Steps from Backend
@@ -108,11 +109,19 @@ if prompt := st.chat_input("Ask about your documentation..."):
                                 preview = source[:100].replace("\n", " ") + "..."
                                 with st.expander(f"Chunk {i+1}: {preview}"):
                                     st.info(source)
-                except Exception as e:
+                except requests.exceptions.RequestException as e:
                     logfire.error(f"❌ UI-Backend Connection Failed: {e}")
                     status.update(label="❌ Connection Failed", state="error")
-                    st.error("Backend Offline.")
+                    st.error(f"Could not reach the backend at {base_url}: {e}")
                     st.stop()
+                except Exception as e:
+                    logfire.error(f"❌ UI failed to handle backend response: {e}")
+                    status.update(label="❌ Unexpected Response", state="error")
+                    st.error(f"Backend responded, but the UI could not process it: {e}")
+                    st.stop()
+
+                if data.get("status") == "error":
+                    status.update(label="⚠️ Backend Error", state="error", expanded=True)
 
             # Final Answer Streaming
             answer_placeholder = st.empty()

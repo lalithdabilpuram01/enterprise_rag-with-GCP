@@ -1,0 +1,29 @@
+# Files NOT uploaded to Cloud Build as build source.
+# Without this file gcloud falls back to a default derived from .gitignore,
+# which does not exclude the corpus or type-checker cache -- that made the
+# source upload 568 MiB across 18k files.
+
+.gcloudignore
+.git
+.gitignore
+
+# Type checker / test caches (.mypy_cache alone is ~500 MiB, 18k files)
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+*.py[oc]
+
+# Virtual environment
+.venv
+.deepeval
+
+# Secrets and local observability state
+.env
+.logfire
+
+# Editor
+.vscode/
+
+# Source documents: ingested separately by app/ingestion/processor.py,
+# they are not needed to build or run the API image.
+DATA/

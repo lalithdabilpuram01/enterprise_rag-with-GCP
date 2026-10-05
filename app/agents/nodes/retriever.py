@@ -1,9 +1,9 @@
 import logfire
-from app.agents.state import Agenstate
+from app.agents.state import Agentstate
 from app.services.retrieval.qdrant_service import search_enterprise_knowledge
 from app.services.retrieval.ranking_service import rerank_documents
 
-def retrieve_node(state: Agenstate):
+def retrieve_node(state: Agentstate):
     """
     Skips retrieval if the planner detected a conversational/memory based query.
     """
