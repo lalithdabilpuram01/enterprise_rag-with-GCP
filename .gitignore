@@ -16,4 +16,5 @@ wheels/
 .logfire
 
 #notebooks
+notebooks/
 .ipynb
